@@ -1,5 +1,5 @@
 /* wolwait.cpp - Start a WOL system and wait for it to boot
- * By Daniel Collins (2009 - 2012)
+ * By Daniel Collins (2009 - 2015)
  * Released to public domain
  *
  * System status is checked by attempting to connect to a TCP port, if the
@@ -72,7 +72,7 @@ static bool parse_mac(unsigned char *addr, char const *string) {
 		}
 	}
 	
-	if(*addr)
+	if(*string)
 	{
 		return false;
 	}
