@@ -145,7 +145,7 @@ sub main
 		{
 			print "Adding ", $file->{name}, " header...\n";
 			
-			print {$fh} pack("Z12VVV",  $file->{name}, 0, $file->{offset}, $file->{length});
+			print {$fh} pack("a12VVV",  $file->{name}, 0, $file->{offset}, $file->{length});
 		}
 		
 		foreach my $file(@files)
@@ -231,7 +231,7 @@ sub mad_calc_offsets
 	foreach my $file(@$files)
 	{
 		# Increment as necessary to align offset
-		$offset += 4 - ($offset % 4) if(($offset % 4) != 0);
+		$offset += $DATA_ALIGNMENT - ($offset % $DATA_ALIGNMENT) if(($offset % $DATA_ALIGNMENT) != 0);
 		
 		$file->{offset} = $offset;
 		$offset += $file->{length};
