@@ -34,27 +34,35 @@ sub main
 	unless(    ((scalar @ARGV) == 2 && $command eq "list")
 		|| ((scalar @ARGV) == 3 && $command eq "cat")
 		|| ((scalar @ARGV) == 2 && $command eq "extract")
-		|| ((scalar @ARGV) == 3 && $command eq "extract"))
+		|| ((scalar @ARGV) == 3 && $command eq "extract")
+		|| ((scalar @ARGV) == 2 && $command eq "create")
+		|| ((scalar @ARGV) == 3 && $command eq "create"))
 	{
 		print "Usage: $0 list    archive.mad\n";
 		print "       $0 cat     archive.mad innerfile.tim\n";
 		print "       $0 extract archive.mad [output directory]\n";
+		print "       $0 create  archive.mad [input directory]\n";
 	
 		exit(42); # EX_USAGE
 	}
 	
-	open(my $fh, "<", $madfile) or die "$madfile: $!\n";
-	binmode($fh, ":raw");
-	
-	my @files = mad_load_index($fh);
-	
 	if($command eq "list")
 	{
+		open(my $fh, "<", $madfile) or die "$madfile: $!\n";
+		binmode($fh, ":raw");
+		
+		my @files = mad_load_index($fh);
+		
 		print $_->{name}, "\n" foreach(@files);
 	}
 	elsif($command eq "cat")
 	{
 		my ($innerfile) = @extra_args;
+		
+		open(my $fh, "<", $madfile) or die "$madfile: $!\n";
+		binmode($fh, ":raw");
+		
+		my @files = mad_load_index($fh);
 		
 		my ($file) = grep { $_->{name} eq $innerfile }
 			@files;
@@ -71,6 +79,11 @@ sub main
 	{
 		my ($outdir) = @extra_args;
 		
+		open(my $fh, "<", $madfile) or die "$madfile: $!\n";
+		binmode($fh, ":raw");
+		
+		my @files = mad_load_index($fh);
+		
 		if(defined $outdir)
 		{
 			chdir($outdir) or die "chdir: $!\n";
@@ -84,6 +97,65 @@ sub main
 			binmode($ofh, ":raw");
 			
 			print {$ofh} $data;
+		}
+	}
+	elsif($command eq "create")
+	{
+		my ($indir) = @extra_args;
+		
+		open(my $fh, ">", $madfile) or die "$madfile: $!\n";
+		binmode($fh, ":raw");
+		
+		if(defined $indir)
+		{
+			chdir($indir) or die "chdir: $!\n";
+		}
+		
+		my @files = ();
+		{
+			opendir(my $dh, ".")
+				or die "opendir: $!\n";
+				
+			foreach my $name(readdir($dh))
+			{
+				next unless(-f $name);
+				
+				unless(mad_name_ok($name))
+				{
+					print STDERR "Skipping $name - names must be in DOS format\n";
+					next;
+				}
+				
+				open(my $ifh, "<", $name) or die "$name: $!\n";
+				binmode($ifh, ":raw");
+				
+				my $data = do { local $/; <$ifh> };
+				
+				push(@files, {
+					name   => $name,
+					data   => $data,
+					length => length($data), # For parity with mad_load_index() data structure
+				});
+			}
+		}
+		
+		mad_calc_offsets(\@files);
+		
+		foreach my $file(@files)
+		{
+			print "Adding ", $file->{name}, " header...\n";
+			
+			print {$fh} pack("Z12VVV",  $file->{name}, 0, $file->{offset}, $file->{length});
+		}
+		
+		foreach my $file(@files)
+		{
+			print "Adding ", $file->{name}, " data...\n";
+			
+			my $pad = $file->{offset} - tell($fh);
+			print {$fh} ("\x{00}" x $pad);
+			
+			print {$fh} $file->{data};
 		}
 	}
 }
@@ -116,7 +188,7 @@ sub mad_load_index
 		# Limit filenames to a small set of characters to avoid corrupt
 		# or badly-parsed files extracting outside of the CWD.
 		die "Unexpected characters in filename ($name) - corrupt MAD file?\n"
-			unless($name =~ m/^[A-Za-z0-9 !#\$%&'\(\)\-\@^_`\{\}~\.]+$/s);
+			unless(mad_name_ok($name));
 		
 		push(@files, {
 			name   => $name,
@@ -146,4 +218,29 @@ sub mad_load_data
 		unless(length($data) == $file->{length});
 	
 	return $data;
+}
+
+sub mad_calc_offsets
+{
+	my ($files) = @_;
+	
+	my $DATA_ALIGNMENT = 4; # Based on files I've seen
+	
+	my $offset = (scalar @$files) * 24; # Start placing files after the headers
+	
+	foreach my $file(@$files)
+	{
+		# Increment as necessary to align offset
+		$offset += 4 - ($offset % 4) if(($offset % 4) != 0);
+		
+		$file->{offset} = $offset;
+		$offset += $file->{length};
+	}
+}
+
+sub mad_name_ok
+{
+	my ($name) = @_;
+	
+	return scalar ($name =~ m/^[A-Za-z0-9 !#\$%&'\(\)\-\@^_`\{\}~\.]{1,12}$/s);
 }
