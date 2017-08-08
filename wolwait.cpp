@@ -1,12 +1,12 @@
 /* wolwait.cpp - Start a WOL system and wait for it to boot
- * By Daniel Collins (2009 - 2015)
+ * By Daniel Collins (2009 - 2017)
  * Released to public domain
  *
  * System status is checked by attempting to connect to a TCP port, if the
  * connection succeeds the program exits with status 0, otherwise it will send
  * another WOL packet and retry the connection. If the timeout is reached
  * before a successful connection occurs, the program will exit with status 2.
- * Status 1 is returned upon error.
+ * Other status codes will be returned upon error.
  *
  * This is only tested on Linux, but it will probably work fine on other UNIXes
  * like BSD.
@@ -29,17 +29,20 @@
 #include <netdb.h>
 #include <arpa/nameser.h>
 #include <resolv.h>
+#include <sysexits.h>
 
-#define valid_port(port) (atoi(port) >= 0 && atoi(port) <= 65535)
+#define valid_port(port) (atoi(port) >= 1 && atoi(port) <= 65535)
 
 static void usage(char const *argv0) {
 	fprintf(stderr, "Usage: %s [options] <-D|MAC address> <Hostname/IP> <Port>\n\n", argv0);
-	fprintf(stderr, "-w <timeout>\tSpecify timeout in seconds (Default: 300)\n");
-	fprintf(stderr, "-f\t\tWait forever\n");
-	fprintf(stderr, "-A <address>\tSet broadcast address\n");
-	fprintf(stderr, "-P <port>\tSet broadcast port\n");
-	fprintf(stderr, "-d <delay>\tTime to wait between connection attempts (Default: 5)\n");
-	fprintf(stderr, "-D\t\tAttempt to get MAC address from DNS TXT records\n");
+	fprintf(stderr, "-w <timeout>  Specify timeout in seconds (Default: 300)\n");
+	fprintf(stderr, "-f            Wait forever\n");
+	fprintf(stderr, "-u            Send WOL packets directly to the host\n");
+	fprintf(stderr, "              (Usually requires a static ARP table entry)\n");
+	fprintf(stderr, "-A <address>  Send WOL packets to this address\n");
+	fprintf(stderr, "-P <port>     Send WOL packets to this port\n");
+	fprintf(stderr, "-d <delay>    Time to wait between connection attempts\n");
+	fprintf(stderr, "-D            Get MAC address from DNS TXT records\n");
 }
 
 /* Attempt to parse a MAC address string and write the binary form to addr.
@@ -96,7 +99,7 @@ static void build_wol_packet(unsigned char *buf, unsigned char *mac) {
  *
  * Dies on errors or if none are found.
 */
-static void mac_from_dns(unsigned char *addr, const char *hostname) {
+static int mac_from_dns(unsigned char *addr, const char *hostname) {
 	unsigned char buf[PACKETSZ];
 	
 	int len = res_search(hostname, C_IN, T_TXT, (u_char*)buf, sizeof(buf));
@@ -104,13 +107,13 @@ static void mac_from_dns(unsigned char *addr, const char *hostname) {
 	{
 		if(h_errno == NO_ADDRESS)
 		{
-			fprintf(stderr, "No TXT records found in DNS\n");
+			fprintf(stderr, "No TXT records found for %s in DNS\n", hostname);
+			return EX_NOHOST;
 		}
 		else{
-			fprintf(stderr, "Unable to resolve host: %s\n", hstrerror(h_errno));
+			fprintf(stderr, "%s: %s\n", hostname, hstrerror(h_errno));
+			return EX_UNAVAILABLE;
 		}
-		
-		exit(1);
 	}
 	
 	ns_msg response;
@@ -118,7 +121,7 @@ static void mac_from_dns(unsigned char *addr, const char *hostname) {
 	if(ns_initparse(buf, len, &response) == -1)
 	{
 		fprintf(stderr, "ns_initparse: %s\n", hstrerror(h_errno));
-		exit(1);
+		return EX_PROTOCOL;
 	}
 	
 	int rcount = ns_msg_count(response, ns_s_an);
@@ -130,7 +133,7 @@ static void mac_from_dns(unsigned char *addr, const char *hostname) {
 		if(ns_parserr(&response, ns_s_an, i, &rec) == -1)
 		{
 			fprintf(stderr, "ns_parserr: %s\n", hstrerror(h_errno));
-			exit(1);
+			return EX_PROTOCOL;
 		}
 		
 		char *rec_buf = ((char*)ns_rr_rdata(rec)) + 1;
@@ -140,12 +143,12 @@ static void mac_from_dns(unsigned char *addr, const char *hostname) {
 		
 		if(parse_mac(addr, rec_str.c_str()))
 		{
-			return;
+			return EX_OK;
 		}
 	}
 	
-	fprintf(stderr, "None of the TXT records found in DNS look like a MAC address\n");
-	exit(1);
+	fprintf(stderr, "None of the TXT records for %s look like a MAC address\n", hostname);
+	return EX_NOHOST;
 }
 
 int main(int argc, char **argv) {
@@ -159,18 +162,16 @@ int main(int argc, char **argv) {
 	opterr = 0;
 	
 	/* Address to send WOL packets to */
+	const char *wol_host = "255.255.255.255";
+	const char *wol_port = "9";
+	bool wol_direct      = false;
 	
-	struct sockaddr_in wol_addr;
-	wol_addr.sin_family = AF_INET;
-	wol_addr.sin_addr.s_addr = INADDR_BROADCAST;
-	wol_addr.sin_port = htons(9);
-	
-	while((arg = getopt(argc, argv, "w:fA:P:d:D")) != -1)
+	while((arg = getopt(argc, argv, "w:fuA:P:d:D")) != -1)
 	{
 		if(arg == '?')
 		{
 			usage(argv[0]);
-			return 1;
+			return 0;
 		}
 		else if(arg == 'w')
 		{
@@ -178,19 +179,20 @@ int main(int argc, char **argv) {
 			
 			if(timeout <= 0) {
 				fprintf(stderr, "Invalid timeout value\n");
-				return 1;
+				return EX_USAGE;
 			}
 		}
 		else if(arg == 'f')
 		{
 			timeout = 0;
 		}
+		else if(arg == 'u')
+		{
+			wol_direct = true;
+		}
 		else if(arg == 'A')
 		{
-			if(!inet_pton(AF_INET, optarg, &wol_addr.sin_addr)) {
-				fprintf(stderr, "Invalid broadcast address\n");
-				return 1;
-			}
+			wol_host = optarg;
 		}
 		else if(arg == 'P')
 		{
@@ -199,7 +201,7 @@ int main(int argc, char **argv) {
 				return 1;
 			}
 			
-			wol_addr.sin_port = htons(atoi(optarg));
+			wol_port = optarg;
 		}
 		else if(arg == 'd')
 		{
@@ -207,7 +209,7 @@ int main(int argc, char **argv) {
 			
 			if(loop_wait <= 0) {
 				fprintf(stderr, "Invalid reconnect delay\n");
-				return 1;
+				return EX_USAGE;
 			}
 		}
 		else if(arg == 'D')
@@ -219,46 +221,65 @@ int main(int argc, char **argv) {
 	if(optind + (use_dns ? 2 : 3) != argc)
 	{
 		usage(argv[0]);
-		return 1;
+		return EX_USAGE;
 	}
 	
 	char *mac_a  = argv[optind];
 	char *host_a = argv[optind + (use_dns ? 0 : 1)];
 	char *port_a = argv[optind + (use_dns ? 1 : 2)];
 	
+	if(wol_direct)
+	{
+		wol_host = host_a;
+	}
+	
+	struct addrinfo *wol_ai;
+	
+	{
+		int err = getaddrinfo(wol_host, wol_port, NULL, &wol_ai);
+		if(err != 0)
+		{
+			fprintf(stderr, "%s: %s\n", wol_host, gai_strerror(err));
+			return EX_UNAVAILABLE;
+		}
+	}
+	
 	if(use_dns)
 	{
-		mac_from_dns(dest_mac, host_a);
+		int status = mac_from_dns(dest_mac, host_a);
+		if(status != EX_OK)
+		{
+			return status;
+		}
 	}
 	else if(!parse_mac(dest_mac, mac_a))
 	{
 		fprintf(stderr, "Invalid MAC address supplied\n");
-		return 1;
+		return EX_USAGE;
 	}
 	
 	if(!valid_port(port_a))
 	{
-		fprintf(stderr, "Invalid host port\n");
-		return 1;
+		fprintf(stderr, "Invalid host port: %s\n", port_a);
+		return EX_USAGE;
 	}
 	
-	struct hostent *he = gethostbyname(host_a);
-	if(!he)
+	struct addrinfo *test_ai;
+	
 	{
-		fprintf(stderr, "Unable to resolve host: %s\n", hstrerror(h_errno));
-		return 1;
+		int err = getaddrinfo(host_a, port_a, NULL, &test_ai);
+		if(err != 0)
+		{
+			fprintf(stderr, "%s: %s\n", host_a, gai_strerror(err));
+			return EX_UNAVAILABLE;
+		}
 	}
 	
-	struct sockaddr_in host_addr;
-	host_addr.sin_family = AF_INET;
-	host_addr.sin_addr.s_addr = *(uint32_t*)he->h_addr;
-	host_addr.sin_port = htons(atoi(port_a));
-	
-	int wol_socket = socket(AF_INET, SOCK_DGRAM, 0);
+	int wol_socket = socket(wol_ai->ai_family, SOCK_DGRAM, 0);
 	if(wol_socket == -1)
 	{
 		fprintf(stderr, "Could not create UDP socket: %s\n", strerror(errno));
-		return 1;
+		return EX_OSERR;
 	}
 	
 	int bc_enable = 1;
@@ -266,14 +287,14 @@ int main(int argc, char **argv) {
 	if(setsockopt(wol_socket, SOL_SOCKET, SO_BROADCAST, &bc_enable, sizeof(bc_enable)) == -1)
 	{
 		fprintf(stderr, "Could not enable broadcast on UDP socket: %s\n", strerror(errno));
-		return 1;
+		return EX_OSERR;
 	}
 	
-	int tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
+	int tcp_socket = socket(test_ai->ai_family, SOCK_STREAM, 0);
 	if(tcp_socket == -1)
 	{
 		fprintf(stderr, "Could not create TCP socket: %s\n", strerror(errno));
-		return 1;
+		return EX_OSERR;
 	}
 	
 	time_t begin = time(NULL);
@@ -284,12 +305,15 @@ int main(int argc, char **argv) {
 	
 	while(!timeout || begin + timeout > time(NULL))
 	{
-		if(sendto(wol_socket, packet, WOL_PACKET_SIZE, 0, (struct sockaddr*)&wol_addr, sizeof(wol_addr)) == -1)
+		if(sendto(wol_socket, packet, WOL_PACKET_SIZE, 0, wol_ai->ai_addr, wol_ai->ai_addrlen) == -1)
 		{
 			fprintf(stderr, "Could not send WOL packet: %s\n", strerror(errno));
+			
+			status = EX_TEMPFAIL;
+			break;
 		}
 		
-		if(connect(tcp_socket, (struct sockaddr*)&host_addr, sizeof(host_addr)) == 0)
+		if(connect(tcp_socket, test_ai->ai_addr, test_ai->ai_addrlen) == 0)
 		{
 			status = 0;
 			break;
@@ -300,6 +324,9 @@ int main(int argc, char **argv) {
 	
 	close(tcp_socket);
 	close(wol_socket);
+	
+	freeaddrinfo(test_ai);
+	freeaddrinfo(wol_ai);
 	
 	return status;
 }
