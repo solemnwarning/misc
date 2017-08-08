@@ -80,6 +80,9 @@ sub process_tcp_file
 		# Ignore listen sockets.
 		next if(hex($st) == 0x0A);
 		
+		# Convert port from hex string to an integer.
+		$local_port = hex($local_port);
+		
 		if(grep { $local_port == $_ } SERVICE_PORTS)
 		{
 			$last_used = time();
