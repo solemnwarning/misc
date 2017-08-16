@@ -123,7 +123,7 @@ my $rsync_target = undef;
 			{
 				if($processing_e)
 				{
-					unless($opt =~ m/[\.iLsf]/)
+					unless($opt =~ m/[\.iLsfxC]/)
 					{
 						print STDERR "Unexpected character after -e: $opt\n";
 						exit(1); # "Syntax error or usage error"
