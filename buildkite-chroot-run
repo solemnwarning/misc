@@ -1,0 +1,99 @@
+#!/usr/bin/perl
+# Run a command inside a read-only (j)chroot with the current directory mounted
+# read-write within it.
+#
+# This is intended for running commands as part of a job under buildkite-agent
+# without allowing them to have any effect outside of the build directory.
+#
+# NOTE: If the process within the chroot manages to gain root privileges it will
+# be able to do things to the host system.
+#
+# Setup instructions:
+#
+# 1) Create a chroot under /srv/build-chroot/ using debootstrap or similar.
+#
+# 2) Copy the buildkite-agent user/group into it and create an empty home
+#    directory.
+#
+# 3) Install this script and jchroot to somewhere in your PATH.
+#
+# 4) Allow buildkite-agent to run this script via sudo, by adding something
+#    like the following to your sudoers file:
+#    
+#    buildkite-agent ALL=(root) NOPASSWD: /usr/local/bin/buildkite-chroot-run
+#
+# Now you should be able to run commands via `sudo buildkite-chroot-run` in
+# your Buildkite jobs.
+
+use strict;
+use warnings;
+
+use Cwd;
+use File::Temp qw(tempdir);
+use User::pwent;
+
+use constant BUILD_CHROOT => "/srv/build-chroot/";
+use constant BUILD_USER   => "buildkite-agent";
+
+my $buildkite_passwd = getpwnam(BUILD_USER)
+	// die "Cannot find ".BUILD_USER." user\n";
+
+my $buildkite_uid  = $buildkite_passwd->uid();
+my $buildkite_gid  = $buildkite_passwd->gid();
+my $buildkite_home = $buildkite_passwd->dir();
+
+my $cwd = getcwd();
+
+unless($cwd =~ m{^\Q$buildkite_home\E(/|$)}s)
+{
+	die "You must be in a directory under $buildkite_home to run this command\n";
+}
+
+if((scalar @ARGV) == 0)
+{
+	die "Usage: $0 <command> [arguments]\n";
+}
+
+my $root = tempdir();
+
+# Write out an fstab of filesystems for jchroot to mount inside the chroot.
+my $fstab = File::Temp->new();
+print {$fstab} "none  /proc  proc   defaults                 0 0\n";
+print {$fstab} "none  /tmp   tmpfs  size=32000000,mode=1777  0 0\n";
+
+my $ok = (
+	# Bind mount the reference chroot read-only at a temporary directory to
+	# ensure nothing inside the chroot can modify it.
+	!system("mount", "-o", "bind,ro", BUILD_CHROOT, "$root/")
+	
+	# Mount a tmpfs at the build user home directory...
+	&& !system("mount", "-t", "tmpfs", "none", "${root}${buildkite_home}/")
+	
+	# ...make any directories under it leading up to our cwd...
+	&& !system("mkdir", "-p", "${root}${cwd}/")
+	
+	# ...and bind mount our cwd from outside the chroot.
+	&& !system("mount", "-o", "bind", "$cwd", "${root}${cwd}/")
+	
+	# Enter the chroot and do our stuff.
+	&& !system("jchroot",
+			"-N",                   # Create network namespace
+			"-u" => $buildkite_uid, # Set UID
+			"-g" => $buildkite_gid, # Set GID
+			"-f" => "$fstab",       # Mount /proc/ and /tmp/
+			"-c" => $cwd,           # Change to cwd inside chroot
+			$root, "--", @ARGV)
+);
+
+# BUG: /tmp/ and /proc/ should be unmounted implicitly by the kernel when the
+# process exits according to the jchroot documentation...
+system("umount", "$root/tmp/");
+system("umount", "$root/proc/");
+
+system("umount", "${root}${cwd}/");
+system("umount", "${root}${buildkite_home}/");
+system("umount", "$root/");
+
+rmdir($root);
+
+exit($ok ? 0 : 1);
