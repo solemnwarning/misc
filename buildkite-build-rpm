@@ -1,0 +1,150 @@
+#!/usr/bin/perl
+# Build an RPM package inside a chroot.
+#
+# This is intended for building RPMs as part of a Buildkite job. A tmpfs is
+# overlaid on top of the chroot so that the master chroot is not affected by
+# installing dependencies etc.
+#
+# The working directory is bind mounted within the chroot to allow for getting
+# sources in and binaries out.
+#
+# NOTE: If the process within the chroot manages to gain root privileges it will
+# be able to escape and do things to the host system.
+#
+# Setup instructions:
+#
+# 1) Create a chroot under /srv/chroot/XXX/ (e.g. using yum/dnf).
+#
+# 2) Copy the buildkite-agent user/group into it.
+#
+# 3) Install this script and jchroot to somewhere in your PATH.
+#
+# 4) Allow buildkite-agent to run this script via sudo, by adding something
+#    like the following to your sudoers file:
+#
+#    buildkite-agent ALL=(root) NOPASSWD: /usr/local/bin/buildkite-build-rpm
+
+use strict;
+use warnings;
+
+use Cwd;
+use File::Temp qw(tempdir);
+use Readonly;
+use User::pwent;
+
+Readonly my $BUILD_CHROOT_DIR => "/srv/chroot/";
+Readonly my $BUILD_USER       => "buildkite-agent";
+Readonly my $TMPFS_SIZE       => "2G";
+
+my $buildkite_passwd = getpwnam($BUILD_USER)
+	// die "Cannot find ".$BUILD_USER." user\n";
+
+my $buildkite_uid  = $buildkite_passwd->uid();
+my $buildkite_gid  = $buildkite_passwd->gid();
+my $buildkite_home = $buildkite_passwd->dir();
+
+my $cwd = getcwd();
+
+unless($cwd =~ m{^\Q$buildkite_home\E(/|$)}s)
+{
+	die "You must be in a directory under $buildkite_home to run this command\n";
+}
+
+if((scalar @ARGV) < 2)
+{
+	die "Usage: $0 <chroot name> <spec file> [rpmbuild arguments]\n";
+}
+
+my ($chroot_name, $spec_file, @rpmbuild_args) = @ARGV;
+
+my @chroot_names = do {
+	opendir(my $dir, $BUILD_CHROOT_DIR) or die "$BUILD_CHROOT_DIR: $!\n";
+	readdir($dir);
+};
+
+unless(grep { $_ eq $chroot_name } @chroot_names)
+{
+	die "Unknown chroot: $chroot_name\n";
+}
+
+# Ensure permissive umask, else buildkite user can't chdir into chroot.
+umask(022);
+
+my $tmpdir = File::Temp->newdir();
+
+# Write out an fstab of filesystems for jchroot to mount inside the chroot.
+my $fstab = File::Temp->new();
+print {$fstab} "none  /proc  proc   defaults    0 0\n";
+
+my $lower = "$BUILD_CHROOT_DIR/$chroot_name/";
+my $upper = "$tmpdir/upper/";
+my $work  = "$tmpdir/work/";
+my $root  = "$tmpdir/root/";
+
+my $ok = (
+	print("--- Setting up chroot\n")
+	
+	# Mount a tmpfs over our temporary directory.
+	&& !system("mount", "-t" =>"tmpfs", "-o" => "size=$TMPFS_SIZE", "tmpfs", "$tmpdir")
+	
+	# Set up an overlayfs mount redirecting any changes we make to the
+	# chroot into the tmpfs.
+	&& mkdir($upper, 0755) && mkdir($work, 0755) && mkdir($root, 0755)
+	&& !system("mount", "-t", "overlay", "-o", "lowerdir=$lower,upperdir=$upper,workdir=$work", "overlay", "$root")
+	
+	# Bind mount host /dev/ inside the chroot.
+	&& !system("mount", "-o", "bind,ro", "/dev/", "$root/dev/")
+	
+	# Make any directories leading up to our cwd in the chroot...
+	&& !system("mkdir", "-p", "$root/$cwd/")
+	
+	# ...and bind mount our cwd from outside the chroot.
+	&& !system("mount", "-o", "bind", "$cwd", "$root/$cwd/")
+	
+	&& print("--- Updating chroot\n")
+	
+	# Enter the chroot and install any updates.
+	&& !system("jchroot",
+			"-f" => "$fstab",       # Mount /proc/
+			"-c" => $cwd,           # Change to cwd inside chroot
+			$root, "--",
+				"dnf", "upgrade")
+	
+	&& print("--- Installing build dependencies\n")
+	
+	# Enter the chroot and install build dependencies.
+	&& !system("jchroot",
+			"-f" => "$fstab",       # Mount /proc/
+			"-c" => $cwd,           # Change to cwd inside chroot
+			$root, "--",
+				"dnf", "builddep", "$spec_file")
+	
+	&& print("--- Executing rpmbuild\n")
+	
+	# Enter the chroot and do our stuff.
+	&& !system("jchroot",
+			"-N",                   # Create network namespace
+			"-u" => $buildkite_uid, # Set UID
+			"-g" => $buildkite_gid, # Set GID
+			"-f" => "$fstab",       # Mount /proc/
+			"-c" => $cwd,           # Change to cwd inside chroot
+			$root, "--",
+				"rpmbuild", @rpmbuild_args, "-ba", "$spec_file")
+);
+
+print "--- Cleaning up chroot\n";
+
+# BUG: /proc/ should be unmounted implicitly by the kernel when the process
+# exits according to the jchroot documentation...
+system("umount", "$root/proc/");
+system("umount", "$root/proc/");
+system("umount", "$root/proc/");
+
+system("umount", "$root/$cwd/");
+system("umount", "$root/dev/");
+system("umount", "$root");
+system("umount", "$tmpdir");
+
+rmdir($root);
+
+exit($ok ? 0 : 1);
