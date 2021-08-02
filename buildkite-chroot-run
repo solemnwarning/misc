@@ -10,16 +10,16 @@
 #
 # Setup instructions:
 #
-# 1) Create a chroot under /srv/build-chroot/ using debootstrap or similar.
+# 1) Create chroot(s) under /srv/chroot/XXX/ using debootstrap or similar.
 #
-# 2) Copy the buildkite-agent user/group into it and create an empty home
-#    directory.
+# 2) Create an empty home directory for buildkite-agent
+#    (usually /var/lib/buildkite-agent) inside the chroot(s).
 #
 # 3) Install this script and jchroot to somewhere in your PATH.
 #
 # 4) Allow buildkite-agent to run this script via sudo, by adding something
 #    like the following to your sudoers file:
-#    
+#
 #    buildkite-agent ALL=(root) NOPASSWD: /usr/local/bin/buildkite-chroot-run
 #
 # Now you should be able to run commands via `sudo buildkite-chroot-run` in
@@ -32,7 +32,6 @@ use Cwd;
 use File::Temp qw(tempdir);
 use User::pwent;
 
-use constant BUILD_CHROOT => "/srv/build-chroot/";
 use constant BUILD_USER   => "buildkite-agent";
 
 my $buildkite_passwd = getpwnam(BUILD_USER)
@@ -49,22 +48,33 @@ unless($cwd =~ m{^\Q$buildkite_home\E(/|$)}s)
 	die "You must be in a directory under $buildkite_home to run this command\n";
 }
 
-if((scalar @ARGV) == 0)
+if((scalar @ARGV) < 2)
 {
-	die "Usage: $0 <command> [arguments]\n";
+	die "Usage: $0 <chroot> <command> [arguments]\n";
+}
+
+my $chroot_name = shift(@ARGV);
+my $chroot = "/srv/chroot/$chroot_name";
+
+if($chroot_name eq "" || $chroot_name eq "." || $chroot_name eq ".." || $chroot_name =~ m|/| || !(-d $chroot))
+{
+	die "Invalid chroot specified\n";
 }
 
 my $root = tempdir();
 
 # Write out an fstab of filesystems for jchroot to mount inside the chroot.
 my $fstab = File::Temp->new();
-print {$fstab} "none  /proc  proc   defaults                 0 0\n";
-print {$fstab} "none  /tmp   tmpfs  size=32000000,mode=1777  0 0\n";
+print {$fstab} "none  /proc  proc   defaults                  0 0\n";
+print {$fstab} "none  /tmp   tmpfs  size=256000000,mode=1777  0 0\n";
 
 my $ok = (
 	# Bind mount the reference chroot read-only at a temporary directory to
 	# ensure nothing inside the chroot can modify it.
-	!system("mount", "-o", "bind,ro", BUILD_CHROOT, "$root/")
+	!system("mount", "-o", "bind,ro", $chroot, "$root/")
+	
+	# Bind mount /dev/ from host system to allow FUSE...
+	&& !system("mount", "-o", "bind,ro", "/dev/", "${root}/dev/")
 	
 	# Mount a tmpfs at the build user home directory...
 	&& !system("mount", "-t", "tmpfs", "none", "${root}${buildkite_home}/")
@@ -91,6 +101,7 @@ system("umount", "$root/tmp/");
 system("umount", "$root/proc/");
 
 system("umount", "${root}${cwd}/");
+system("umount", "${root}/dev/");
 system("umount", "${root}${buildkite_home}/");
 system("umount", "$root/");
 
