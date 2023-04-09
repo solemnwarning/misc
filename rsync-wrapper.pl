@@ -54,6 +54,8 @@ Readonly my @ALLOWED_SHORT_OPTS =>
 	"t", # times
 	"O", # omit-dir-times
 	"x", # one-file-system
+	"S", # sparse files
+	"q", # quiet
 );
 
 Readonly my @ALLOWED_LONG_OPTS =>
@@ -77,6 +79,10 @@ Readonly my @ALLOWED_LONG_OPTS =>
 	"omit-dir-times",
 	"one-file-system",
 	"numeric-ids",
+	"size-only",
+	"ignore-existing",
+	"sparse",
+	"quiet",
 );
 
 die "Usage: $0 <backups directory>\n"
@@ -123,7 +129,7 @@ my $rsync_target = undef;
 			{
 				if($processing_e)
 				{
-					unless($opt =~ m/[\.iLsfxC]/)
+					unless($opt =~ m/[\.iLsfxCIvu]/)
 					{
 						print STDERR "Unexpected character after -e: $opt\n";
 						exit(1); # "Syntax error or usage error"
