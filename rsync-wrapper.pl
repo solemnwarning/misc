@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # This script can be used to wrap rsync, providing a write-only backup service
 # where the client cannot delete or modify any existing backup.
 #
